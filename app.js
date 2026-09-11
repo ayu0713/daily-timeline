@@ -1,6 +1,12 @@
 const DB_NAME = "DailyTimelineDB";
 const DB_VERSION = 4;
 
+const TODO_TYPE = {
+    ONE_TIME: "normal",
+    RECURRING: "routine",
+    OCCURRENCE: "routineOccurrence"
+};
+
 let db = null;
 let currentScreen = "timeline";
 let selectedDate = getTodayDateString();
@@ -30,11 +36,11 @@ function minutesToTime(minutes) {
 
 function escapeHtml(value) {
     return String(value ?? "")
-        .replace(/&/g, "&")
-        .replace(/</g, "<")
-        .replace(/>/g, ">")
-        .replace(/"/g, "”")
-        .replace(/'/g, "'");
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }
 
 function getWeekdayLabel(dateString) {
@@ -121,6 +127,7 @@ function getCurrentColorTheme() {
 
 function applyColorTheme() {
     const themeKey = getCurrentColorTheme();
+
     const theme =
         COLOR_THEMES[themeKey] || COLOR_THEMES.monochrome;
 
@@ -285,6 +292,99 @@ function deleteTodo(id) {
 }
 
 // =========================
+// Todo data normalization
+// =========================
+
+async function normalizeTodoData() {
+    const todos = await getAllTodos();
+
+    for (const todo of todos) {
+        // ---------------------------------
+        // 一度きりのタスク
+        // ---------------------------------
+        if (todo.type === TODO_TYPE.ONE_TIME) {
+            // 一度きりタスクが完了済みなのに
+            // DBに残っていた場合は削除する
+            if (todo.completed === true) {
+                await deleteTodo(todo.id);
+                continue;
+            }
+
+            // 一度きりタスクは
+            // date / startTime を持つことができる
+            continue;
+        }
+
+        // ---------------------------------
+        // 繰り返しタスク本体
+        // ---------------------------------
+        if (todo.type === TODO_TYPE.RECURRING) {
+            // 繰り返しタスク本体には
+            // Timeline上の配置情報を持たせない
+            let changed = false;
+
+            if (todo.date !== null && todo.date !== undefined) {
+                todo.date = null;
+                changed = true;
+            }
+
+            if (
+                todo.startTime !== null &&
+                todo.startTime !== undefined
+            ) {
+                todo.startTime = null;
+                changed = true;
+            }
+
+            // 繰り返しタスク本体には完了状態を持たせない
+            if (todo.completed !== false) {
+                todo.completed = false;
+                changed = true;
+            }
+
+            if (changed) {
+                await saveTodo(todo);
+            }
+
+            continue;
+        }
+
+        // ---------------------------------
+        // 繰り返しタスクのTimeline上の予定
+        // ---------------------------------
+        if (todo.type === TODO_TYPE.OCCURRENCE) {
+            // occurrenceはTimeline専用なので
+            // ToDo一覧には表示しない
+            continue;
+        }
+
+        // ---------------------------------
+        // 想定外の古いデータ
+        // ---------------------------------
+        // typeが存在しない古いToDoは
+        // 一度きりのタスクとして扱う
+        if (!todo.type) {
+            todo.type = TODO_TYPE.ONE_TIME;
+
+            if (todo.completed === true) {
+                await deleteTodo(todo.id);
+                continue;
+            }
+
+            if (todo.date === undefined) {
+                todo.date = null;
+            }
+
+            if (todo.startTime === undefined) {
+                todo.startTime = null;
+            }
+
+            await saveTodo(todo);
+        }
+    }
+}
+
+// =========================
 // Expired one-time Todo
 // =========================
 
@@ -293,12 +393,12 @@ async function restoreExpiredOneTimeTodos() {
     const today = getTodayDateString();
 
     for (const todo of todos) {
-        // 繰り返しToDoのTimeline用コピーは対象外
-        if (todo.type !== "normal") {
+        // 一度きりのタスクだけが対象
+        if (todo.type !== TODO_TYPE.ONE_TIME) {
             continue;
         }
 
-        // Timelineに配置されていないものは対象外
+        // Timelineに配置されていない
         if (
             todo.date === null ||
             todo.date === undefined ||
@@ -308,15 +408,18 @@ async function restoreExpiredOneTimeTodos() {
             continue;
         }
 
-        // 完了済みなら通常は既に削除されているため対象外
-        if (todo.completed) {
+        // 完了済みなら対象外
+        if (todo.completed === true) {
+            await deleteTodo(todo.id);
             continue;
         }
 
-        // 今日より前の日付なら、ToDoリストへ戻す
+        // 今日より前の日付に配置されていて
+        // 未完了ならToDoリストへ戻す
         if (todo.date < today) {
             todo.date = null;
             todo.startTime = null;
+            todo.completed = false;
 
             await saveTodo(todo);
         }
@@ -561,6 +664,7 @@ async function renderScreen() {
 // =========================
 
 async function renderTimelineScreen(screen) {
+    await normalizeTodoData();
     await restoreExpiredOneTimeTodos();
 
     const routines = await getAllRoutines();
@@ -569,7 +673,9 @@ async function renderTimelineScreen(screen) {
     const weekday = getWeekdayNumber(selectedDate);
 
     const dayRoutines = routines
-        .filter((routine) => routine.days.includes(weekday))
+        .filter((routine) =>
+            routine.days.includes(weekday)
+        )
         .map((routine) => ({
             id: routine.id,
             kind: "routine",
@@ -584,7 +690,11 @@ async function renderTimelineScreen(screen) {
             (todo) =>
                 todo.date === selectedDate &&
                 todo.startTime !== null &&
-                todo.startTime !== undefined
+                todo.startTime !== undefined &&
+                (
+                    todo.type === TODO_TYPE.ONE_TIME ||
+                    todo.type === TODO_TYPE.OCCURRENCE
+                )
         )
         .map((todo) => {
             const start = timeToMinutes(todo.startTime);
@@ -600,7 +710,10 @@ async function renderTimelineScreen(screen) {
             };
         });
 
-    const items = [...dayRoutines, ...dayTodos].sort(
+    const items = [
+        ...dayRoutines,
+        ...dayTodos
+    ].sort(
         (a, b) =>
             timeToMinutes(a.startTime) -
             timeToMinutes(b.startTime)
@@ -613,7 +726,9 @@ async function renderTimelineScreen(screen) {
 
                 <div class="timeline-date">
                     <div class="screen-title">Timeline</div>
-                    <div class="selected-date">${escapeHtml(formatDate(selectedDate))}</div>
+                    <div class="selected-date">
+                        ${escapeHtml(formatDate(selectedDate))}
+                    </div>
                 </div>
 
                 <button class="icon-button" id="next-day">›</button>
@@ -622,11 +737,21 @@ async function renderTimelineScreen(screen) {
             <div class="timeline-header-actions">
                 ${
                     !isToday(selectedDate)
-                        ? `<button class="secondary-button" id="today-button">戻る</button>`
+                        ? `
+                            <button
+                                class="secondary-button"
+                                id="today-button"
+                            >
+                                戻る
+                            </button>
+                        `
                         : ""
                 }
 
-                <button class="primary-button" id="add-routine-button">
+                <button
+                    class="primary-button"
+                    id="add-routine-button"
+                >
                     ＋ ルーティンを追加
                 </button>
             </div>
@@ -650,16 +775,25 @@ async function renderTimelineScreen(screen) {
             const end = timeToMinutes(item.endTime);
 
             if (start > previousEnd) {
-                html += renderFreeTime(previousEnd, start);
+                html += renderFreeTime(
+                    previousEnd,
+                    start
+                );
             }
 
             html += renderTimelineItem(item);
 
-            previousEnd = Math.max(previousEnd, end);
+            previousEnd = Math.max(
+                previousEnd,
+                end
+            );
         }
 
         if (previousEnd < 24 * 60) {
-            html += renderFreeTime(previousEnd, 24 * 60);
+            html += renderFreeTime(
+                previousEnd,
+                24 * 60
+            );
         }
 
         html += `</div>`;
@@ -670,14 +804,22 @@ async function renderTimelineScreen(screen) {
     document
         .getElementById("previous-day")
         .addEventListener("click", async () => {
-            selectedDate = changeDate(selectedDate, -1);
+            selectedDate = changeDate(
+                selectedDate,
+                -1
+            );
+
             await renderTimelineScreen(screen);
         });
 
     document
         .getElementById("next-day")
         .addEventListener("click", async () => {
-            selectedDate = changeDate(selectedDate, 1);
+            selectedDate = changeDate(
+                selectedDate,
+                1
+            );
+
             await renderTimelineScreen(screen);
         });
 
@@ -685,10 +827,17 @@ async function renderTimelineScreen(screen) {
         document.getElementById("today-button");
 
     if (todayButton) {
-        todayButton.addEventListener("click", async () => {
-            selectedDate = getTodayDateString();
-            await renderTimelineScreen(screen);
-        });
+        todayButton.addEventListener(
+            "click",
+            async () => {
+                selectedDate =
+                    getTodayDateString();
+
+                await renderTimelineScreen(
+                    screen
+                );
+            }
+        );
     }
 
     document
@@ -697,109 +846,190 @@ async function renderTimelineScreen(screen) {
             renderRoutineForm(screen);
         });
 
-    screen.querySelectorAll(".edit-routine-button").forEach(
-        (button) => {
-            button.addEventListener("click", async () => {
-                const routines = await getAllRoutines();
+    screen
+        .querySelectorAll(".edit-routine-button")
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                async () => {
+                    const routines =
+                        await getAllRoutines();
 
-                const routine = routines.find(
-                    (item) => item.id === button.dataset.id
-                );
+                    const routine =
+                        routines.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
 
-                if (routine) {
-                    renderRoutineForm(screen, routine);
+                    if (routine) {
+                        renderRoutineForm(
+                            screen,
+                            routine
+                        );
+                    }
                 }
-            });
-        }
-    );
+            );
+        });
 
-    screen.querySelectorAll(".delete-routine-button").forEach(
-        (button) => {
-            button.addEventListener("click", async () => {
-                const confirmed = confirm(
-                    "このルーティンを削除しますか？"
-                );
+    screen
+        .querySelectorAll(".delete-routine-button")
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                async () => {
+                    const confirmed = confirm(
+                        "このルーティンを削除しますか？"
+                    );
 
-                if (!confirmed) return;
+                    if (!confirmed) return;
 
-                await deleteRoutine(button.dataset.id);
-                await renderTimelineScreen(screen);
-            });
-        }
-    );
+                    await deleteRoutine(
+                        button.dataset.id
+                    );
 
-    screen.querySelectorAll(".complete-todo-button").forEach(
-        (button) => {
-            button.addEventListener("click", async () => {
-                const todos = await getAllTodos();
-
-                const todo = todos.find(
-                    (item) => item.id === button.dataset.id
-                );
-
-                if (!todo) return;
-
-                // 一度きりのToDoは完了した時点で削除
-                if (todo.type === "normal") {
-                    await deleteTodo(todo.id);
+                    await renderTimelineScreen(
+                        screen
+                    );
                 }
+            );
+        });
 
-                // 繰り返しToDoのTimeline上の予定は
-                // 完了状態だけを保存する
-                else if (todo.type === "routineOccurrence") {
-                    todo.completed = !todo.completed;
-                    await saveTodo(todo);
+    screen
+        .querySelectorAll(".complete-todo-button")
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                async () => {
+                    const todos =
+                        await getAllTodos();
+
+                    const todo =
+                        todos.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
+
+                    if (!todo) return;
+
+                    // ---------------------------------
+                    // 一度きり
+                    // ---------------------------------
+                    // 完了した瞬間に完全削除
+                    if (
+                        todo.type ===
+                        TODO_TYPE.ONE_TIME
+                    ) {
+                        await deleteTodo(
+                            todo.id
+                        );
+                    }
+
+                    // ---------------------------------
+                    // 繰り返しのTimeline予定
+                    // ---------------------------------
+                    // 予定だけ完了状態を変更
+                    // 元の繰り返しToDoには触れない
+                    else if (
+                        todo.type ===
+                        TODO_TYPE.OCCURRENCE
+                    ) {
+                        todo.completed =
+                            !todo.completed;
+
+                        await saveTodo(todo);
+                    }
+
+                    await renderTimelineScreen(
+                        screen
+                    );
                 }
+            );
+        });
 
-                await renderTimelineScreen(screen);
-            });
-        }
-    );
+    screen
+        .querySelectorAll(".remove-todo-button")
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                async () => {
+                    const todos =
+                        await getAllTodos();
 
-    screen.querySelectorAll(".remove-todo-button").forEach(
-        (button) => {
-            button.addEventListener("click", async () => {
-                const todos = await getAllTodos();
+                    const todo =
+                        todos.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
 
-                const todo = todos.find(
-                    (item) => item.id === button.dataset.id
-                );
+                    if (!todo) return;
 
-                if (!todo) return;
+                    // ---------------------------------
+                    // 一度きり
+                    // ---------------------------------
+                    // Timelineから外して
+                    // ToDoリストに戻す
+                    if (
+                        todo.type ===
+                        TODO_TYPE.ONE_TIME
+                    ) {
+                        todo.date = null;
+                        todo.startTime = null;
+                        todo.completed = false;
 
-                // 一度きりToDoは未配置状態へ戻す
-                if (todo.type === "normal") {
-                    todo.date = null;
-                    todo.startTime = null;
+                        await saveTodo(todo);
+                    }
 
-                    await saveTodo(todo);
+                    // ---------------------------------
+                    // 繰り返し
+                    // ---------------------------------
+                    // Timeline上のこの予定だけ削除
+                    // 元の繰り返しToDoは残す
+                    else if (
+                        todo.type ===
+                        TODO_TYPE.OCCURRENCE
+                    ) {
+                        await deleteTodo(
+                            todo.id
+                        );
+                    }
+
+                    await renderTimelineScreen(
+                        screen
+                    );
                 }
+            );
+        });
 
-                // 繰り返しToDoの予定は、その予定だけ削除する
-                else if (todo.type === "routineOccurrence") {
-                    await deleteTodo(todo.id);
+    screen
+        .querySelectorAll(".schedule-todo-button")
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                async () => {
+                    const start =
+                        Number(
+                            button.dataset.start
+                        );
+
+                    const end =
+                        Number(
+                            button.dataset.end
+                        );
+
+                    selectedGap = {
+                        start,
+                        end
+                    };
+
+                    await renderTodoSelection(
+                        screen
+                    );
                 }
-
-                await renderTimelineScreen(screen);
-            });
-        }
-    );
-
-    screen.querySelectorAll(".schedule-todo-button").forEach(
-        (button) => {
-            button.addEventListener("click", async () => {
-                const start = Number(button.dataset.start);
-                const end = Number(button.dataset.end);
-
-                selectedGap = {
-                    start,
-                    end
-                };
-
-                await renderTodoSelection(screen);
-            });
-        }
-    );
+            );
+        });
 }
 
 function renderTimelineItem(item) {
@@ -844,10 +1074,13 @@ function renderTimelineItem(item) {
     }
 
     const completedClass =
-        item.data.completed ? "completed" : "";
+        item.data.completed
+            ? "completed"
+            : "";
 
     const isRecurring =
-        item.data.type === "routineOccurrence";
+        item.data.type ===
+        TODO_TYPE.OCCURRENCE;
 
     return `
         <div class="timeline-item todo-item ${completedClass}">
@@ -879,7 +1112,11 @@ function renderTimelineItem(item) {
                         class="small-button complete-todo-button"
                         data-id="${escapeHtml(item.id)}"
                     >
-                        ${item.data.completed ? "未完了" : "完了"}
+                        ${
+                            item.data.completed
+                                ? "未完了"
+                                : "完了"
+                        }
                     </button>
 
                     <button
@@ -928,7 +1165,10 @@ function renderFreeTime(start, end) {
 // Routine form
 // =========================
 
-function renderRoutineForm(screen, routine = null) {
+function renderRoutineForm(
+    screen,
+    routine = null
+) {
     const isEdit = Boolean(routine);
 
     const selectedDays = routine
@@ -939,23 +1179,35 @@ function renderRoutineForm(screen, routine = null) {
         <div class="screen-header">
             <div>
                 <div class="screen-title">
-                    ${isEdit ? "ルーティンを編集" : "ルーティンを追加"}
+                    ${
+                        isEdit
+                            ? "ルーティンを編集"
+                            : "ルーティンを追加"
+                    }
                 </div>
             </div>
 
-            <button class="secondary-button" id="cancel-routine">
+            <button
+                class="secondary-button"
+                id="cancel-routine"
+            >
                 キャンセル
             </button>
         </div>
 
-        <form id="routine-form" class="form-card">
+        <form
+            id="routine-form"
+            class="form-card"
+        >
 
             <label>
                 タイトル
                 <input
                     type="text"
                     id="routine-title"
-                    value="${escapeHtml(routine?.title || "")}"
+                    value="${escapeHtml(
+                        routine?.title || ""
+                    )}"
                     placeholder="例：ジム"
                     required
                 >
@@ -968,7 +1220,10 @@ function renderRoutineForm(screen, routine = null) {
                     <input
                         type="time"
                         id="routine-start"
-                        value="${escapeHtml(routine?.startTime || "09:00")}"
+                        value="${escapeHtml(
+                            routine?.startTime ||
+                            "09:00"
+                        )}"
                         required
                     >
                 </label>
@@ -978,7 +1233,10 @@ function renderRoutineForm(screen, routine = null) {
                     <input
                         type="time"
                         id="routine-end"
-                        value="${escapeHtml(routine?.endTime || "10:00")}"
+                        value="${escapeHtml(
+                            routine?.endTime ||
+                            "10:00"
+                        )}"
                         required
                     >
                 </label>
@@ -986,7 +1244,9 @@ function renderRoutineForm(screen, routine = null) {
             </div>
 
             <div class="form-section">
-                <div class="form-section-title">曜日</div>
+                <div class="form-section-title">
+                    曜日
+                </div>
 
                 <div class="weekday-selector">
                     ${
@@ -1001,18 +1261,24 @@ function renderRoutineForm(screen, routine = null) {
                         ]
                             .map(
                                 ([day, label]) => `
-                                    <label class="weekday-option">
+                                    <label
+                                        class="weekday-option"
+                                    >
                                         <input
                                             type="checkbox"
                                             name="routine-day"
                                             value="${day}"
                                             ${
-                                                selectedDays.includes(day)
+                                                selectedDays.includes(
+                                                    day
+                                                )
                                                     ? "checked"
                                                     : ""
                                             }
                                         >
-                                        <span>${label}</span>
+                                        <span>
+                                            ${label}
+                                        </span>
                                     </label>
                                 `
                             )
@@ -1021,8 +1287,15 @@ function renderRoutineForm(screen, routine = null) {
                 </div>
             </div>
 
-            <button class="primary-button full-width" type="submit">
-                ${isEdit ? "変更を保存" : "追加する"}
+            <button
+                class="primary-button full-width"
+                type="submit"
+            >
+                ${
+                    isEdit
+                        ? "変更を保存"
+                        : "追加する"
+                }
             </button>
 
             ${
@@ -1044,127 +1317,194 @@ function renderRoutineForm(screen, routine = null) {
 
     document
         .getElementById("cancel-routine")
-        .addEventListener("click", async () => {
-            await renderTimelineScreen(screen);
-        });
+        .addEventListener(
+            "click",
+            async () => {
+                await renderTimelineScreen(
+                    screen
+                );
+            }
+        );
 
     document
         .getElementById("routine-form")
-        .addEventListener("submit", async (event) => {
-            event.preventDefault();
+        .addEventListener(
+            "submit",
+            async (event) => {
+                event.preventDefault();
 
-            const title = document
-                .getElementById("routine-title")
-                .value.trim();
+                const title =
+                    document
+                        .getElementById(
+                            "routine-title"
+                        )
+                        .value.trim();
 
-            const startTime =
-                document.getElementById("routine-start").value;
+                const startTime =
+                    document
+                        .getElementById(
+                            "routine-start"
+                        )
+                        .value;
 
-            const endTime =
-                document.getElementById("routine-end").value;
+                const endTime =
+                    document
+                        .getElementById(
+                            "routine-end"
+                        )
+                        .value;
 
-            const days = [
-                ...document.querySelectorAll(
-                    'input[name="routine-day"]:checked'
-                )
-            ].map((input) => Number(input.value));
-
-            if (!title) {
-                alert("タイトルを入力してください。");
-                return;
-            }
-
-            if (!startTime || !endTime) {
-                alert("開始・終了時刻を入力してください。");
-                return;
-            }
-
-            if (
-                timeToMinutes(endTime) <=
-                timeToMinutes(startTime)
-            ) {
-                alert(
-                    "終了時刻は開始時刻より後にしてください。"
+                const days = [
+                    ...document.querySelectorAll(
+                        'input[name="routine-day"]:checked'
+                    )
+                ].map(
+                    (input) =>
+                        Number(input.value)
                 );
-                return;
-            }
 
-            if (days.length === 0) {
-                alert("曜日を1つ以上選択してください。");
-                return;
-            }
-
-            const routines = await getAllRoutines();
-            const currentId = routine?.id;
-
-            const hasOverlap = routines.some((existing) => {
-                if (existing.id === currentId) {
-                    return false;
+                if (!title) {
+                    alert(
+                        "タイトルを入力してください。"
+                    );
+                    return;
                 }
 
-                const sameDay = existing.days.some((day) =>
-                    days.includes(day)
-                );
-
-                if (!sameDay) {
-                    return false;
+                if (!startTime || !endTime) {
+                    alert(
+                        "開始・終了時刻を入力してください。"
+                    );
+                    return;
                 }
 
-                const existingStart =
-                    timeToMinutes(existing.startTime);
+                if (
+                    timeToMinutes(endTime) <=
+                    timeToMinutes(startTime)
+                ) {
+                    alert(
+                        "終了時刻は開始時刻より後にしてください。"
+                    );
+                    return;
+                }
 
-                const existingEnd =
-                    timeToMinutes(existing.endTime);
+                if (days.length === 0) {
+                    alert(
+                        "曜日を1つ以上選択してください。"
+                    );
+                    return;
+                }
 
-                const newStart =
-                    timeToMinutes(startTime);
+                const routines =
+                    await getAllRoutines();
 
-                const newEnd =
-                    timeToMinutes(endTime);
+                const currentId =
+                    routine?.id;
 
-                return (
-                    newStart < existingEnd &&
-                    newEnd > existingStart
+                const hasOverlap =
+                    routines.some(
+                        (existing) => {
+                            if (
+                                existing.id ===
+                                currentId
+                            ) {
+                                return false;
+                            }
+
+                            const sameDay =
+                                existing.days.some(
+                                    (day) =>
+                                        days.includes(
+                                            day
+                                        )
+                                );
+
+                            if (!sameDay) {
+                                return false;
+                            }
+
+                            const existingStart =
+                                timeToMinutes(
+                                    existing.startTime
+                                );
+
+                            const existingEnd =
+                                timeToMinutes(
+                                    existing.endTime
+                                );
+
+                            const newStart =
+                                timeToMinutes(
+                                    startTime
+                                );
+
+                            const newEnd =
+                                timeToMinutes(
+                                    endTime
+                                );
+
+                            return (
+                                newStart <
+                                    existingEnd &&
+                                newEnd >
+                                    existingStart
+                            );
+                        }
+                    );
+
+                if (hasOverlap) {
+                    alert(
+                        "同じ曜日・時間帯に別のルーティンがあります。"
+                    );
+                    return;
+                }
+
+                const newRoutine = {
+                    id:
+                        routine?.id ||
+                        createId(),
+                    title,
+                    startTime,
+                    endTime,
+                    days,
+                    createdAt:
+                        routine?.createdAt ||
+                        new Date().toISOString()
+                };
+
+                await saveRoutine(
+                    newRoutine
                 );
-            });
 
-            if (hasOverlap) {
-                alert(
-                    "同じ曜日・時間帯に別のルーティンがあります。"
+                await renderTimelineScreen(
+                    screen
                 );
-                return;
             }
+        );
 
-            const newRoutine = {
-                id: routine?.id || createId(),
-                title,
-                startTime,
-                endTime,
-                days,
-                createdAt:
-                    routine?.createdAt ||
-                    new Date().toISOString()
-            };
-
-            await saveRoutine(newRoutine);
-            await renderTimelineScreen(screen);
-        });
-
-    const deleteButton = document.getElementById(
-        "delete-routine-form"
-    );
+    const deleteButton =
+        document.getElementById(
+            "delete-routine-form"
+        );
 
     if (deleteButton) {
-        deleteButton.addEventListener("click", async () => {
-            const confirmed = confirm(
-                "このルーティンを削除しますか？"
-            );
+        deleteButton.addEventListener(
+            "click",
+            async () => {
+                const confirmed = confirm(
+                    "このルーティンを削除しますか？"
+                );
 
-            if (!confirmed) return;
+                if (!confirmed) return;
 
-            await deleteRoutine(routine.id);
-            await renderTimelineScreen(screen);
-        });
+                await deleteRoutine(
+                    routine.id
+                );
+
+                await renderTimelineScreen(
+                    screen
+                );
+            }
+        );
     }
 }
 
@@ -1173,54 +1513,86 @@ function renderRoutineForm(screen, routine = null) {
 // =========================
 
 async function renderTodoSelection(screen) {
+    await normalizeTodoData();
+
     const todos = await getAllTodos();
 
-    const availableTodos = todos.filter((todo) => {
-        const duration = Number(todo.duration);
+    const gapDuration =
+        selectedGap.end -
+        selectedGap.start;
 
-        const gapDuration =
-            selectedGap.end - selectedGap.start;
+    // ---------------------------------
+    // 一度きりのタスク
+    // ---------------------------------
+    // 未配置のものだけ選択可能
+    const oneTimeTodos =
+        todos.filter((todo) => {
+            if (
+                todo.type !==
+                TODO_TYPE.ONE_TIME
+            ) {
+                return false;
+            }
 
-        // 一度きりToDo
-        // 既にTimelineへ配置されているものは選択不可
-        if (todo.type === "normal") {
             const isUnscheduled =
+                todo.date === null ||
+                todo.date === undefined ||
                 todo.startTime === null ||
                 todo.startTime === undefined;
 
             return (
                 isUnscheduled &&
-                duration <= gapDuration
+                Number(todo.duration) <=
+                    gapDuration
             );
-        }
+        });
 
-        // 繰り返しToDo
-        // 元のToDoは常に選択可能
-        if (todo.type === "routine") {
-            return duration <= gapDuration;
-        }
+    // ---------------------------------
+    // 繰り返しタスク
+    // ---------------------------------
+    // 常に選択可能
+    // Timelineに入れるたびに
+    // occurrenceを新規作成する
+    const recurringTodos =
+        todos.filter((todo) => {
+            if (
+                todo.type !==
+                TODO_TYPE.RECURRING
+            ) {
+                return false;
+            }
 
-        return false;
-    });
+            return (
+                Number(todo.duration) <=
+                gapDuration
+            );
+        });
 
-    const oneTimeTodos = availableTodos.filter(
-        (todo) => todo.type === "normal"
-    );
-
-    const recurringTodos = availableTodos.filter(
-        (todo) => todo.type === "routine"
-    );
+    const availableTodos = [
+        ...oneTimeTodos,
+        ...recurringTodos
+    ];
 
     screen.innerHTML = `
         <div class="screen-header">
             <div>
-                <div class="screen-title">ToDoを入れる</div>
+                <div class="screen-title">
+                    ToDoを入れる
+                </div>
+
                 <div class="selected-date">
-                    ${escapeHtml(formatDate(selectedDate))}
+                    ${escapeHtml(
+                        formatDate(
+                            selectedDate
+                        )
+                    )}
                 </div>
             </div>
 
-            <button class="secondary-button" id="cancel-schedule">
+            <button
+                class="secondary-button"
+                id="cancel-schedule"
+            >
                 キャンセル
             </button>
         </div>
@@ -1228,9 +1600,17 @@ async function renderTodoSelection(screen) {
         <div class="schedule-gap-info">
             <strong>空き時間</strong>
             <span>
-                ${escapeHtml(minutesToTime(selectedGap.start))}
+                ${escapeHtml(
+                    minutesToTime(
+                        selectedGap.start
+                    )
+                )}
                 〜
-                ${escapeHtml(minutesToTime(selectedGap.end))}
+                ${escapeHtml(
+                    minutesToTime(
+                        selectedGap.end
+                    )
+                )}
             </span>
         </div>
 
@@ -1238,32 +1618,59 @@ async function renderTodoSelection(screen) {
             availableTodos.length === 0
                 ? `
                     <div class="empty-state">
-                        <p>この空き時間に入れられるToDoがありません。</p>
-                        <p>ToDoを作成するか、別の空き時間を選んでください。</p>
+                        <p>
+                            この空き時間に入れられるToDoがありません。
+                        </p>
+
+                        <p>
+                            ToDoを作成するか、
+                            別の空き時間を選んでください。
+                        </p>
                     </div>
                 `
                 : `
-                    ${
-                        oneTimeTodos.length > 0
-                            ? `
-                                <div class="settings-section-title">
-                                    一度きりのタスク
-                                </div>
+                    <div class="settings-section-title">
+                        一度きりのタスク
+                    </div>
 
+                    <div class="screen-subtitle">
+                        完了するとToDoリストから消えます
+                    </div>
+
+                    ${
+                        oneTimeTodos.length === 0
+                            ? `
+                                <div class="empty-state">
+                                    <p>
+                                        入れられる一度きりのタスクはありません。
+                                    </p>
+                                </div>
+                            `
+                            : `
                                 <div class="todo-selection-list">
                                     ${oneTimeTodos
                                         .map(
                                             (todo) => `
                                                 <button
                                                     class="todo-selection-card"
-                                                    data-id="${escapeHtml(todo.id)}"
+                                                    data-id="${escapeHtml(
+                                                        todo.id
+                                                    )}"
                                                 >
-                                                    <span class="todo-selection-title">
-                                                        ${escapeHtml(todo.title)}
+                                                    <span
+                                                        class="todo-selection-title"
+                                                    >
+                                                        ${escapeHtml(
+                                                            todo.title
+                                                        )}
                                                     </span>
 
-                                                    <span class="todo-selection-meta">
-                                                        ${escapeHtml(todo.duration)}分
+                                                    <span
+                                                        class="todo-selection-meta"
+                                                    >
+                                                        ${escapeHtml(
+                                                            todo.duration
+                                                        )}分
                                                         ・一度きり
                                                     </span>
                                                 </button>
@@ -1272,30 +1679,50 @@ async function renderTodoSelection(screen) {
                                         .join("")}
                                 </div>
                             `
-                            : ""
                     }
 
-                    ${
-                        recurringTodos.length > 0
-                            ? `
-                                <div class="settings-section-title">
-                                    繰り返しのタスク
-                                </div>
+                    <div class="settings-section-title">
+                        繰り返しのタスク
+                    </div>
 
+                    <div class="screen-subtitle">
+                        何度でもTimelineに入れられます
+                    </div>
+
+                    ${
+                        recurringTodos.length === 0
+                            ? `
+                                <div class="empty-state">
+                                    <p>
+                                        入れられる繰り返しタスクはありません。
+                                    </p>
+                                </div>
+                            `
+                            : `
                                 <div class="todo-selection-list">
                                     ${recurringTodos
                                         .map(
                                             (todo) => `
                                                 <button
                                                     class="todo-selection-card"
-                                                    data-id="${escapeHtml(todo.id)}"
+                                                    data-id="${escapeHtml(
+                                                        todo.id
+                                                    )}"
                                                 >
-                                                    <span class="todo-selection-title">
-                                                        ${escapeHtml(todo.title)}
+                                                    <span
+                                                        class="todo-selection-title"
+                                                    >
+                                                        ${escapeHtml(
+                                                            todo.title
+                                                        )}
                                                     </span>
 
-                                                    <span class="todo-selection-meta">
-                                                        ${escapeHtml(todo.duration)}分
+                                                    <span
+                                                        class="todo-selection-meta"
+                                                    >
+                                                        ${escapeHtml(
+                                                            todo.duration
+                                                        )}分
                                                         ・繰り返し
                                                     </span>
                                                 </button>
@@ -1304,7 +1731,6 @@ async function renderTodoSelection(screen) {
                                         .join("")}
                                 </div>
                             `
-                            : ""
                     }
                 `
         }
@@ -1312,55 +1738,98 @@ async function renderTodoSelection(screen) {
 
     document
         .getElementById("cancel-schedule")
-        .addEventListener("click", async () => {
-            await renderTimelineScreen(screen);
-        });
+        .addEventListener(
+            "click",
+            async () => {
+                await renderTimelineScreen(
+                    screen
+                );
+            }
+        );
 
     screen
-        .querySelectorAll(".todo-selection-card")
+        .querySelectorAll(
+            ".todo-selection-card"
+        )
         .forEach((button) => {
-            button.addEventListener("click", async () => {
-                const todos = await getAllTodos();
+            button.addEventListener(
+                "click",
+                async () => {
+                    const todos =
+                        await getAllTodos();
 
-                const todo = todos.find(
-                    (item) => item.id === button.dataset.id
-                );
+                    const todo =
+                        todos.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
 
-                if (!todo) return;
+                    if (!todo) return;
 
-                // 一度きりのToDo
-                // 元データそのものをTimelineへ配置
-                if (todo.type === "normal") {
-                    todo.date = selectedDate;
-                    todo.startTime = minutesToTime(
-                        selectedGap.start
+                    // ---------------------------------
+                    // 一度きり
+                    // ---------------------------------
+                    // 本体そのものをTimelineへ移動
+                    if (
+                        todo.type ===
+                        TODO_TYPE.ONE_TIME
+                    ) {
+                        todo.date =
+                            selectedDate;
+
+                        todo.startTime =
+                            minutesToTime(
+                                selectedGap.start
+                            );
+
+                        todo.completed =
+                            false;
+
+                        await saveTodo(todo);
+                    }
+
+                    // ---------------------------------
+                    // 繰り返し
+                    // ---------------------------------
+                    // 本体は絶対に変更しない
+                    // Timeline用の予定を新規作成
+                    else if (
+                        todo.type ===
+                        TODO_TYPE.RECURRING
+                    ) {
+                        const occurrence = {
+                            id: createId(),
+                            title: todo.title,
+                            duration:
+                                Number(
+                                    todo.duration
+                                ),
+                            type:
+                                TODO_TYPE.OCCURRENCE,
+                            sourceTodoId:
+                                todo.id,
+                            date:
+                                selectedDate,
+                            startTime:
+                                minutesToTime(
+                                    selectedGap.start
+                                ),
+                            completed: false,
+                            createdAt:
+                                new Date().toISOString()
+                        };
+
+                        await saveTodo(
+                            occurrence
+                        );
+                    }
+
+                    await renderTimelineScreen(
+                        screen
                     );
-
-                    await saveTodo(todo);
                 }
-
-                // 繰り返しToDo
-                // 元データは残し、Timeline用の予定を新しく作る
-                else if (todo.type === "routine") {
-                    const occurrence = {
-                        id: createId(),
-                        title: todo.title,
-                        duration: Number(todo.duration),
-                        type: "routineOccurrence",
-                        sourceTodoId: todo.id,
-                        date: selectedDate,
-                        startTime: minutesToTime(
-                            selectedGap.start
-                        ),
-                        completed: false,
-                        createdAt: new Date().toISOString()
-                    };
-
-                    await saveTodo(occurrence);
-                }
-
-                await renderTimelineScreen(screen);
-            });
+            );
         });
 }
 
@@ -1372,35 +1841,37 @@ function renderTodoListItems(todos) {
     return todos
         .map(
             (todo) => `
-                <div class="todo-list-item ${
-                    todo.completed
-                        ? "completed"
-                        : ""
-                }">
+                <div class="todo-list-item">
 
                     <div class="todo-list-main">
                         <div class="todo-list-title">
-                            ${escapeHtml(todo.title)}
+                            ${escapeHtml(
+                                todo.title
+                            )}
                         </div>
 
                         <div class="todo-list-meta">
-                            ${escapeHtml(todo.duration)}分
+                            ${escapeHtml(
+                                todo.duration
+                            )}分
                             ・
                             ${
-                                todo.type === "routine"
+                                todo.type ===
+                                TODO_TYPE.RECURRING
                                     ? "繰り返し"
                                     : "一度きり"
                             }
 
                             ${
-                                todo.date &&
-                                todo.startTime
-                                    ? `・${escapeHtml(
-                                          todo.date
-                                      )} ${escapeHtml(
-                                          todo.startTime
-                                      )}`
-                                    : "・未配置"
+                                todo.type ===
+                                TODO_TYPE.ONE_TIME
+                                    ? (
+                                        todo.date &&
+                                        todo.startTime
+                                            ? `・Timeline配置済み`
+                                            : "・未配置"
+                                    )
+                                    : ""
                             }
                         </div>
                     </div>
@@ -1432,104 +1903,119 @@ function renderTodoListItems(todos) {
 }
 
 async function renderTodoScreen(screen) {
+    await normalizeTodoData();
     await restoreExpiredOneTimeTodos();
 
     const todos = await getAllTodos();
 
-    // Timeline上の繰り返しToDo用コピーは
-    // ToDoリストには表示しない
-    const todoTemplates = todos.filter(
-        (todo) =>
-            todo.type === "normal" ||
-            todo.type === "routine"
-    );
+    // ToDo画面には
+    // 「一度きり」と「繰り返し」の本体だけ表示
+    // Timeline用 occurrence は表示しない
+    const oneTimeTodos =
+        todos
+            .filter(
+                (todo) =>
+                    todo.type ===
+                    TODO_TYPE.ONE_TIME
+            )
+            .sort(
+                (a, b) =>
+                    new Date(
+                        b.createdAt
+                    ) -
+                    new Date(
+                        a.createdAt
+                    )
+            );
 
-    const oneTimeTodos = todoTemplates
-        .filter((todo) => todo.type === "normal")
-        .sort(
-            (a, b) =>
-                new Date(b.createdAt) -
-                new Date(a.createdAt)
-        );
-
-    const recurringTodos = todoTemplates
-        .filter((todo) => todo.type === "routine")
-        .sort(
-            (a, b) =>
-                new Date(b.createdAt) -
-                new Date(a.createdAt)
-        );
+    const recurringTodos =
+        todos
+            .filter(
+                (todo) =>
+                    todo.type ===
+                    TODO_TYPE.RECURRING
+            )
+            .sort(
+                (a, b) =>
+                    new Date(
+                        b.createdAt
+                    ) -
+                    new Date(
+                        a.createdAt
+                    )
+            );
 
     screen.innerHTML = `
         <div class="screen-header">
             <div>
-                <div class="screen-title">ToDo</div>
+                <div class="screen-title">
+                    ToDo
+                </div>
+
                 <div class="screen-subtitle">
                     一度きりと繰り返しのタスクを管理できます
                 </div>
             </div>
 
-            <button class="primary-button" id="add-todo-button">
+            <button
+                class="primary-button"
+                id="add-todo-button"
+            >
                 ＋ ToDo
             </button>
         </div>
 
+        <div class="settings-section-title">
+            一度きりのタスク
+        </div>
+
+        <div class="screen-subtitle">
+            Timelineに入れて完了すると
+            ToDoリストから消えます
+        </div>
+
         ${
-            todoTemplates.length === 0
+            oneTimeTodos.length === 0
                 ? `
                     <div class="empty-state">
-                        <p>ToDoはまだありません。</p>
-                        <p>一度きり、または繰り返しのタスクを作成できます。</p>
+                        <p>
+                            一度きりのタスクはありません。
+                        </p>
                     </div>
                 `
                 : `
-                    <div class="settings-section-title">
-                        一度きりのタスク
+                    <div class="todo-list">
+                        ${renderTodoListItems(
+                            oneTimeTodos
+                        )}
                     </div>
+                `
+        }
 
-                    <div class="screen-subtitle">
-                        完了するとToDoリストから消えます
+        <div class="settings-section-title">
+            繰り返しのタスク
+        </div>
+
+        <div class="screen-subtitle">
+            Timelineで完了しても残り、
+            削除するまで保持されます
+        </div>
+
+        ${
+            recurringTodos.length === 0
+                ? `
+                    <div class="empty-state">
+                        <p>
+                            繰り返しのタスクはありません。
+                        </p>
                     </div>
-
-                    ${
-                        oneTimeTodos.length === 0
-                            ? `
-                                <div class="empty-state">
-                                    <p>一度きりのタスクはありません。</p>
-                                </div>
-                            `
-                            : `
-                                <div class="todo-list">
-                                    ${renderTodoListItems(
-                                        oneTimeTodos
-                                    )}
-                                </div>
-                            `
-                    }
-
-                    <div class="settings-section-title">
-                        繰り返しのタスク
+                `
+                : `
+                    <div class="todo-list">
+                        ${renderTodoListItems(
+                            recurringTodos
+                        )}
                     </div>
-
-                    <div class="screen-subtitle">
-                        完了しても残り、削除するまで保持されます
-                    </div>
-
-                    ${
-                        recurringTodos.length === 0
-                            ? `
-                                <div class="empty-state">
-                                    <p>繰り返しのタスクはありません。</p>
-                                </div>
-                            `
-                            : `
-                                <div class="todo-list">
-                                    ${renderTodoListItems(
-                                        recurringTodos
-                                    )}
-                                </div>
-                            `
-                    }
                 `
         }
     `;
@@ -1541,34 +2027,57 @@ async function renderTodoScreen(screen) {
         });
 
     screen
-        .querySelectorAll(".edit-todo-button")
+        .querySelectorAll(
+            ".edit-todo-button"
+        )
         .forEach((button) => {
-            button.addEventListener("click", async () => {
-                const todos = await getAllTodos();
+            button.addEventListener(
+                "click",
+                async () => {
+                    const todos =
+                        await getAllTodos();
 
-                const todo = todos.find(
-                    (item) => item.id === button.dataset.id
-                );
+                    const todo =
+                        todos.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
 
-                if (todo) {
-                    renderTodoForm(screen, todo);
+                    if (todo) {
+                        renderTodoForm(
+                            screen,
+                            todo
+                        );
+                    }
                 }
-            });
+            );
         });
 
     screen
-        .querySelectorAll(".delete-todo-button")
+        .querySelectorAll(
+            ".delete-todo-button"
+        )
         .forEach((button) => {
-            button.addEventListener("click", async () => {
-                const confirmed = confirm(
-                    "このToDoを削除しますか？"
-                );
+            button.addEventListener(
+                "click",
+                async () => {
+                    const confirmed =
+                        confirm(
+                            "このToDoを削除しますか？"
+                        );
 
-                if (!confirmed) return;
+                    if (!confirmed) return;
 
-                await deleteTodo(button.dataset.id);
-                await renderTodoScreen(screen);
-            });
+                    await deleteTodo(
+                        button.dataset.id
+                    );
+
+                    await renderTodoScreen(
+                        screen
+                    );
+                }
+            );
         });
 }
 
@@ -1576,28 +2085,50 @@ async function renderTodoScreen(screen) {
 // Todo form
 // =========================
 
-function renderTodoForm(screen, todo = null) {
-    const isEdit = Boolean(todo);
+function renderTodoForm(
+    screen,
+    todo = null
+) {
+    const isEdit =
+        Boolean(todo);
+
+    const currentType =
+        todo?.type ===
+        TODO_TYPE.RECURRING
+            ? TODO_TYPE.RECURRING
+            : TODO_TYPE.ONE_TIME;
 
     screen.innerHTML = `
         <div class="screen-header">
             <div class="screen-title">
-                ${isEdit ? "ToDoを編集" : "ToDoを追加"}
+                ${
+                    isEdit
+                        ? "ToDoを編集"
+                        : "ToDoを追加"
+                }
             </div>
 
-            <button class="secondary-button" id="cancel-todo">
+            <button
+                class="secondary-button"
+                id="cancel-todo"
+            >
                 キャンセル
             </button>
         </div>
 
-        <form id="todo-form" class="form-card">
+        <form
+            id="todo-form"
+            class="form-card"
+        >
 
             <label>
                 タイトル
                 <input
                     type="text"
                     id="todo-title"
-                    value="${escapeHtml(todo?.title || "")}"
+                    value="${escapeHtml(
+                        todo?.title || ""
+                    )}"
                     placeholder="例：市役所に行く"
                     required
                 >
@@ -1608,7 +2139,9 @@ function renderTodoForm(screen, todo = null) {
                 <input
                     type="number"
                     id="todo-duration"
-                    value="${escapeHtml(todo?.duration || 30)}"
+                    value="${escapeHtml(
+                        todo?.duration || 30
+                    )}"
                     min="1"
                     step="1"
                     required
@@ -1616,50 +2149,78 @@ function renderTodoForm(screen, todo = null) {
             </label>
 
             <div class="form-section">
-                <div class="form-section-title">種類</div>
+                <div class="form-section-title">
+                    種類
+                </div>
 
                 <div class="todo-type-selector">
 
-                    <label class="todo-type-option">
+                    <label
+                        class="todo-type-option"
+                    >
                         <input
                             type="radio"
                             name="todo-type"
-                            value="normal"
+                            value="${TODO_TYPE.ONE_TIME}"
                             ${
-                                !todo ||
-                                todo.type === "normal"
+                                currentType ===
+                                TODO_TYPE.ONE_TIME
                                     ? "checked"
                                     : ""
                             }
                         >
+
                         <span>
-                            <strong>一度きり</strong>
-                            <small>完了するとリストから消えます</small>
+                            <strong>
+                                一度きり
+                            </strong>
+
+                            <small>
+                                Timelineで完了すると
+                                ToDoリストから消えます
+                            </small>
                         </span>
                     </label>
 
-                    <label class="todo-type-option">
+                    <label
+                        class="todo-type-option"
+                    >
                         <input
                             type="radio"
                             name="todo-type"
-                            value="routine"
+                            value="${TODO_TYPE.RECURRING}"
                             ${
-                                todo?.type === "routine"
+                                currentType ===
+                                TODO_TYPE.RECURRING
                                     ? "checked"
                                     : ""
                             }
                         >
+
                         <span>
-                            <strong>繰り返し</strong>
-                            <small>完了しても残り、何度でもTimelineに入れられます</small>
+                            <strong>
+                                繰り返し
+                            </strong>
+
+                            <small>
+                                完了しても残り、
+                                何度でもTimelineに入れられます
+                            </small>
                         </span>
                     </label>
 
                 </div>
             </div>
 
-            <button class="primary-button full-width" type="submit">
-                ${isEdit ? "変更を保存" : "追加する"}
+            <button
+                class="primary-button full-width"
+                type="submit"
+            >
+                ${
+                    isEdit
+                        ? "変更を保存"
+                        : "追加する"
+                }
             </button>
 
             ${
@@ -1681,85 +2242,148 @@ function renderTodoForm(screen, todo = null) {
 
     document
         .getElementById("cancel-todo")
-        .addEventListener("click", async () => {
-            await renderTodoScreen(screen);
-        });
+        .addEventListener(
+            "click",
+            async () => {
+                await renderTodoScreen(
+                    screen
+                );
+            }
+        );
 
     document
         .getElementById("todo-form")
-        .addEventListener("submit", async (event) => {
-            event.preventDefault();
+        .addEventListener(
+            "submit",
+            async (event) => {
+                event.preventDefault();
 
-            const title = document
-                .getElementById("todo-title")
-                .value.trim();
+                const title =
+                    document
+                        .getElementById(
+                            "todo-title"
+                        )
+                        .value.trim();
 
-            const duration = Number(
-                document.getElementById("todo-duration").value
-            );
+                const duration =
+                    Number(
+                        document
+                            .getElementById(
+                                "todo-duration"
+                            )
+                            .value
+                    );
 
-            const type = document.querySelector(
-                'input[name="todo-type"]:checked'
-            ).value;
+                const type =
+                    document.querySelector(
+                        'input[name="todo-type"]:checked'
+                    ).value;
 
-            if (!title) {
-                alert("タイトルを入力してください。");
-                return;
+                if (!title) {
+                    alert(
+                        "タイトルを入力してください。"
+                    );
+                    return;
+                }
+
+                if (
+                    !duration ||
+                    duration <= 0
+                ) {
+                    alert(
+                        "所要時間を正しく入力してください。"
+                    );
+                    return;
+                }
+
+                const now =
+                    new Date().toISOString();
+
+                const newTodo = {
+                    id:
+                        todo?.id ||
+                        createId(),
+
+                    title,
+
+                    duration,
+
+                    type,
+
+                    // ---------------------------------
+                    // 一度きり
+                    // ---------------------------------
+                    // 既にTimelineへ配置済みなら
+                    // その配置情報を維持
+                    date:
+                        type ===
+                        TODO_TYPE.ONE_TIME
+                            ? (
+                                todo?.date ??
+                                null
+                            )
+                            : null,
+
+                    startTime:
+                        type ===
+                        TODO_TYPE.ONE_TIME
+                            ? (
+                                todo?.startTime ??
+                                null
+                            )
+                            : null,
+
+                    // 繰り返し本体は
+                    // 完了状態を持たない
+                    completed:
+                        type ===
+                        TODO_TYPE.RECURRING
+                            ? false
+                            : (
+                                todo?.completed ??
+                                false
+                            ),
+
+                    createdAt:
+                        todo?.createdAt ||
+                        now
+                };
+
+                await saveTodo(
+                    newTodo
+                );
+
+                await renderTodoScreen(
+                    screen
+                );
             }
-
-            if (!duration || duration <= 0) {
-                alert("所要時間を正しく入力してください。");
-                return;
-            }
-
-            const now = new Date().toISOString();
-
-            const newTodo = {
-                id: todo?.id || createId(),
-                title,
-                duration,
-                type,
-
-                // 繰り返しToDoを編集した場合、
-                // Timeline上の配置情報はテンプレートには持たせない
-                date:
-                    type === "routine"
-                        ? null
-                        : todo?.date ?? null,
-
-                startTime:
-                    type === "routine"
-                        ? null
-                        : todo?.startTime ?? null,
-
-                completed:
-                    type === "routine"
-                        ? false
-                        : todo?.completed ?? false,
-
-                createdAt:
-                    todo?.createdAt ||
-                    now
-            };
-
-            await saveTodo(newTodo);
-            await renderTodoScreen(screen);
-        });
+        );
 
     const deleteButton =
-        document.getElementById("delete-todo-form");
+        document.getElementById(
+            "delete-todo-form"
+        );
 
     if (deleteButton) {
-        deleteButton.addEventListener("click", async () => {
-            const confirmed = confirm(
-                "このToDoを削除しますか？"
-            );
+        deleteButton.addEventListener(
+            "click",
+            async () => {
+                const confirmed =
+                    confirm(
+                        "このToDoを削除しますか？"
+                    );
 
-            if (!confirmed) return;
+                if (!confirmed) return;
 
-            await deleteTodo(todo.id);
-            await renderTodoScreen(screen);
-        });
+                await deleteTodo(
+                    todo.id
+                );
+
+                await renderTodoScreen(
+                    screen
+                );
+            }
+        );
     }
 }
 
@@ -1767,18 +2391,33 @@ function renderTodoForm(screen, todo = null) {
 // Calendar
 // =========================
 
-async function renderCalendarScreen(screen) {
+async function renderCalendarScreen(
+    screen
+) {
     const selected =
-        new Date(`${selectedDate}T00:00:00`);
+        new Date(
+            `${selectedDate}T00:00:00`
+        );
 
-    const year = selected.getFullYear();
-    const month = selected.getMonth();
+    const year =
+        selected.getFullYear();
+
+    const month =
+        selected.getMonth();
 
     const firstDay =
-        new Date(year, month, 1);
+        new Date(
+            year,
+            month,
+            1
+        );
 
     const lastDay =
-        new Date(year, month + 1, 0);
+        new Date(
+            year,
+            month + 1,
+            0
+        );
 
     const firstWeekday =
         firstDay.getDay();
@@ -1788,23 +2427,43 @@ async function renderCalendarScreen(screen) {
 
     let calendarDays = "";
 
-    for (let i = 0; i < firstWeekday; i++) {
+    for (
+        let i = 0;
+        i < firstWeekday;
+        i++
+    ) {
         calendarDays += `
             <div class="calendar-day empty"></div>
         `;
     }
 
-    for (let day = 1; day <= daysInMonth; day++) {
+    for (
+        let day = 1;
+        day <= daysInMonth;
+        day++
+    ) {
         const dateString =
-            `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            `${year}-${String(
+                month + 1
+            ).padStart(
+                2,
+                "0"
+            )}-${String(
+                day
+            ).padStart(
+                2,
+                "0"
+            )}`;
 
         const selectedClass =
-            dateString === selectedDate
+            dateString ===
+            selectedDate
                 ? "selected"
                 : "";
 
         const todayClass =
-            dateString === getTodayDateString()
+            dateString ===
+            getTodayDateString()
                 ? "today"
                 : "";
 
@@ -1821,7 +2480,10 @@ async function renderCalendarScreen(screen) {
     screen.innerHTML = `
         <div class="screen-header">
             <div>
-                <div class="screen-title">Calendar</div>
+                <div class="screen-title">
+                    Calendar
+                </div>
+
                 <div class="screen-subtitle">
                     日付を選択してTimelineを表示
                 </div>
@@ -1881,7 +2543,11 @@ async function renderCalendarScreen(screen) {
 
         <div class="calendar-selected-info">
             <div class="calendar-selected-date">
-                ${escapeHtml(formatDate(selectedDate))}
+                ${escapeHtml(
+                    formatDate(
+                        selectedDate
+                    )
+                )}
             </div>
 
             <button
@@ -1894,107 +2560,182 @@ async function renderCalendarScreen(screen) {
     `;
 
     screen
-        .querySelectorAll(".calendar-day:not(.empty)")
+        .querySelectorAll(
+            ".calendar-day:not(.empty)"
+        )
         .forEach((button) => {
-            button.addEventListener("click", async () => {
-                selectedDate = button.dataset.date;
+            button.addEventListener(
+                "click",
+                async () => {
+                    selectedDate =
+                        button.dataset.date;
 
-                await renderCalendarScreen(screen);
-            });
-        });
-
-    document
-        .getElementById("open-selected-date")
-        .addEventListener("click", async () => {
-            currentScreen = "timeline";
-
-            updateNavigationState();
-
-            await renderTimelineScreen(
-                document.getElementById("screen")
+                    await renderCalendarScreen(
+                        screen
+                    );
+                }
             );
         });
 
+    document
+        .getElementById(
+            "open-selected-date"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                currentScreen =
+                    "timeline";
+
+                updateNavigationState();
+
+                await renderTimelineScreen(
+                    document.getElementById(
+                        "screen"
+                    )
+                );
+            }
+        );
+
     const todayButton =
-        document.getElementById("calendar-today");
+        document.getElementById(
+            "calendar-today"
+        );
 
     if (todayButton) {
-        todayButton.addEventListener("click", async () => {
-            selectedDate = getTodayDateString();
+        todayButton.addEventListener(
+            "click",
+            async () => {
+                selectedDate =
+                    getTodayDateString();
 
-            await renderCalendarScreen(screen);
-        });
+                await renderCalendarScreen(
+                    screen
+                );
+            }
+        );
     }
 
     document
-        .getElementById("previous-month")
-        .addEventListener("click", async () => {
-            const previousMonth =
-                new Date(year, month - 1, 1);
+        .getElementById(
+            "previous-month"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                const previousMonth =
+                    new Date(
+                        year,
+                        month - 1,
+                        1
+                    );
 
-            const targetYear =
-                previousMonth.getFullYear();
+                const targetYear =
+                    previousMonth.getFullYear();
 
-            const targetMonth =
-                previousMonth.getMonth();
+                const targetMonth =
+                    previousMonth.getMonth();
 
-            const currentDay =
-                selected.getDate();
+                const currentDay =
+                    selected.getDate();
 
-            const maxDay =
-                new Date(
-                    targetYear,
-                    targetMonth + 1,
-                    0
-                ).getDate();
+                const maxDay =
+                    new Date(
+                        targetYear,
+                        targetMonth + 1,
+                        0
+                    ).getDate();
 
-            const targetDay =
-                Math.min(currentDay, maxDay);
+                const targetDay =
+                    Math.min(
+                        currentDay,
+                        maxDay
+                    );
 
-            selectedDate =
-                `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(targetDay).padStart(2, "0")}`;
+                selectedDate =
+                    `${targetYear}-${String(
+                        targetMonth + 1
+                    ).padStart(
+                        2,
+                        "0"
+                    )}-${String(
+                        targetDay
+                    ).padStart(
+                        2,
+                        "0"
+                    )}`;
 
-            await renderCalendarScreen(screen);
-        });
+                await renderCalendarScreen(
+                    screen
+                );
+            }
+        );
 
     document
-        .getElementById("next-month")
-        .addEventListener("click", async () => {
-            const nextMonth =
-                new Date(year, month + 1, 1);
+        .getElementById(
+            "next-month"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                const nextMonth =
+                    new Date(
+                        year,
+                        month + 1,
+                        1
+                    );
 
-            const targetYear =
-                nextMonth.getFullYear();
+                const targetYear =
+                    nextMonth.getFullYear();
 
-            const targetMonth =
-                nextMonth.getMonth();
+                const targetMonth =
+                    nextMonth.getMonth();
 
-            const currentDay =
-                selected.getDate();
+                const currentDay =
+                    selected.getDate();
 
-            const maxDay =
-                new Date(
-                    targetYear,
-                    targetMonth + 1,
-                    0
-                ).getDate();
+                const maxDay =
+                    new Date(
+                        targetYear,
+                        targetMonth + 1,
+                        0
+                    ).getDate();
 
-            const targetDay =
-                Math.min(currentDay, maxDay);
+                const targetDay =
+                    Math.min(
+                        currentDay,
+                        maxDay
+                    );
 
-            selectedDate =
-                `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(targetDay).padStart(2, "0")}`;
+                selectedDate =
+                    `${targetYear}-${String(
+                        targetMonth + 1
+                    ).padStart(
+                        2,
+                        "0"
+                    )}-${String(
+                        targetDay
+                    ).padStart(
+                        2,
+                        "0"
+                    )}`;
 
-            await renderCalendarScreen(screen);
-        });
+                await renderCalendarScreen(
+                    screen
+                );
+            }
+        );
 }
 
 // =========================
 // Memo
 // =========================
 
-async function renderMemoScreen(screen) {
-    const memos = await getAllMemos();
+async function renderMemoScreen(
+    screen
+) {
+    const memos =
+        await getAllMemos();
 
     memos.sort(
         (a, b) =>
@@ -2005,7 +2746,10 @@ async function renderMemoScreen(screen) {
     screen.innerHTML = `
         <div class="screen-header">
             <div>
-                <div class="screen-title">Memo</div>
+                <div class="screen-title">
+                    Memo
+                </div>
+
                 <div class="screen-subtitle">
                     思いついたことを残しておけます
                 </div>
@@ -2023,8 +2767,13 @@ async function renderMemoScreen(screen) {
             memos.length === 0
                 ? `
                     <div class="empty-state">
-                        <p>Memoはまだありません。</p>
-                        <p>気になったことを自由に残せます。</p>
+                        <p>
+                            Memoはまだありません。
+                        </p>
+
+                        <p>
+                            気になったことを自由に残せます。
+                        </p>
                     </div>
                 `
                 : `
@@ -2038,13 +2787,17 @@ async function renderMemoScreen(screen) {
                                             memo.id
                                         )}"
                                     >
-                                        <span class="memo-list-title">
+                                        <span
+                                            class="memo-list-title"
+                                        >
                                             ${escapeHtml(
                                                 memo.title
                                             )}
                                         </span>
 
-                                        <span class="memo-list-arrow">
+                                        <span
+                                            class="memo-list-arrow"
+                                        >
                                             ›
                                         </span>
                                     </button>
@@ -2057,25 +2810,44 @@ async function renderMemoScreen(screen) {
     `;
 
     document
-        .getElementById("add-memo-button")
-        .addEventListener("click", () => {
-            renderMemoForm(screen);
-        });
+        .getElementById(
+            "add-memo-button"
+        )
+        .addEventListener(
+            "click",
+            () => {
+                renderMemoForm(
+                    screen
+                );
+            }
+        );
 
     screen
-        .querySelectorAll(".memo-list-item")
+        .querySelectorAll(
+            ".memo-list-item"
+        )
         .forEach((button) => {
-            button.addEventListener("click", async () => {
-                const memos = await getAllMemos();
+            button.addEventListener(
+                "click",
+                async () => {
+                    const memos =
+                        await getAllMemos();
 
-                const memo = memos.find(
-                    (item) => item.id === button.dataset.id
-                );
+                    const memo =
+                        memos.find(
+                            (item) =>
+                                item.id ===
+                                button.dataset.id
+                        );
 
-                if (memo) {
-                    renderMemoForm(screen, memo);
+                    if (memo) {
+                        renderMemoForm(
+                            screen,
+                            memo
+                        );
+                    }
                 }
-            });
+            );
         });
 }
 
@@ -2083,13 +2855,21 @@ async function renderMemoScreen(screen) {
 // Memo form
 // =========================
 
-function renderMemoForm(screen, memo = null) {
-    const isEdit = Boolean(memo);
+function renderMemoForm(
+    screen,
+    memo = null
+) {
+    const isEdit =
+        Boolean(memo);
 
     screen.innerHTML = `
         <div class="screen-header">
             <div class="screen-title">
-                ${isEdit ? "Memoを編集" : "Memoを追加"}
+                ${
+                    isEdit
+                        ? "Memoを編集"
+                        : "Memoを追加"
+                }
             </div>
 
             <button
@@ -2100,7 +2880,10 @@ function renderMemoForm(screen, memo = null) {
             </button>
         </div>
 
-        <form id="memo-form" class="form-card">
+        <form
+            id="memo-form"
+            class="form-card"
+        >
 
             <label>
                 タイトル
@@ -2130,7 +2913,11 @@ function renderMemoForm(screen, memo = null) {
                 class="primary-button full-width"
                 type="submit"
             >
-                ${isEdit ? "保存" : "保存する"}
+                ${
+                    isEdit
+                        ? "保存"
+                        : "保存する"
+                }
             </button>
 
             ${
@@ -2151,63 +2938,109 @@ function renderMemoForm(screen, memo = null) {
     `;
 
     document
-        .getElementById("cancel-memo")
-        .addEventListener("click", async () => {
-            await renderMemoScreen(screen);
-        });
+        .getElementById(
+            "cancel-memo"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                await renderMemoScreen(
+                    screen
+                );
+            }
+        );
 
     document
-        .getElementById("memo-form")
-        .addEventListener("submit", async (event) => {
-            event.preventDefault();
+        .getElementById(
+            "memo-form"
+        )
+        .addEventListener(
+            "submit",
+            async (event) => {
+                event.preventDefault();
 
-            const title = document
-                .getElementById("memo-title")
-                .value.trim();
+                const title =
+                    document
+                        .getElementById(
+                            "memo-title"
+                        )
+                        .value.trim();
 
-            const content = document
-                .getElementById("memo-content")
-                .value.trim();
+                const content =
+                    document
+                        .getElementById(
+                            "memo-content"
+                        )
+                        .value.trim();
 
-            if (!title) {
-                alert("タイトルを入力してください。");
-                return;
+                if (!title) {
+                    alert(
+                        "タイトルを入力してください。"
+                    );
+                    return;
+                }
+
+                if (!content) {
+                    alert(
+                        "本文を入力してください。"
+                    );
+                    return;
+                }
+
+                const now =
+                    new Date().toISOString();
+
+                const newMemo = {
+                    id:
+                        memo?.id ||
+                        createId(),
+
+                    title,
+
+                    content,
+
+                    createdAt:
+                        memo?.createdAt ||
+                        now,
+
+                    updatedAt: now
+                };
+
+                await saveMemo(
+                    newMemo
+                );
+
+                await renderMemoScreen(
+                    screen
+                );
             }
-
-            if (!content) {
-                alert("本文を入力してください。");
-                return;
-            }
-
-            const now = new Date().toISOString();
-
-            const newMemo = {
-                id: memo?.id || createId(),
-                title,
-                content,
-                createdAt:
-                    memo?.createdAt || now,
-                updatedAt: now
-            };
-
-            await saveMemo(newMemo);
-            await renderMemoScreen(screen);
-        });
+        );
 
     const deleteButton =
-        document.getElementById("delete-memo-form");
+        document.getElementById(
+            "delete-memo-form"
+        );
 
     if (deleteButton) {
-        deleteButton.addEventListener("click", async () => {
-            const confirmed = confirm(
-                "このMemoを削除しますか？"
-            );
+        deleteButton.addEventListener(
+            "click",
+            async () => {
+                const confirmed =
+                    confirm(
+                        "このMemoを削除しますか？"
+                    );
 
-            if (!confirmed) return;
+                if (!confirmed) return;
 
-            await deleteMemo(memo.id);
-            await renderMemoScreen(screen);
-        });
+                await deleteMemo(
+                    memo.id
+                );
+
+                await renderMemoScreen(
+                    screen
+                );
+            }
+        );
     }
 }
 
@@ -2216,14 +3049,21 @@ function renderMemoForm(screen, memo = null) {
 // =========================
 
 async function createBackupData() {
-    const routines = await getAllRoutines();
-    const todos = await getAllTodos();
-    const memos = await getAllMemos();
+    const routines =
+        await getAllRoutines();
+
+    const todos =
+        await getAllTodos();
+
+    const memos =
+        await getAllMemos();
 
     return {
         version: 1,
-        exportedAt: new Date().toISOString(),
-        colorTheme: getCurrentColorTheme(),
+        exportedAt:
+            new Date().toISOString(),
+        colorTheme:
+            getCurrentColorTheme(),
         routines,
         todos,
         memos
@@ -2232,100 +3072,174 @@ async function createBackupData() {
 
 async function backupData() {
     try {
-        const data = await createBackupData();
+        const data =
+            await createBackupData();
 
-        const json = JSON.stringify(data, null, 2);
+        const json =
+            JSON.stringify(
+                data,
+                null,
+                2
+            );
 
-        const blob = new Blob(
-            [json],
-            {
-                type: "application/json"
-            }
-        );
+        const blob =
+            new Blob(
+                [json],
+                {
+                    type:
+                        "application/json"
+                }
+            );
 
-        const url = URL.createObjectURL(blob);
+        const url =
+            URL.createObjectURL(
+                blob
+            );
 
-        const link = document.createElement("a");
+        const link =
+            document.createElement(
+                "a"
+            );
+
         link.href = url;
+
         link.download =
             `daily-timeline-backup-${getTodayDateString()}.json`;
 
-        document.body.appendChild(link);
+        document.body.appendChild(
+            link
+        );
+
         link.click();
+
         link.remove();
 
-        URL.revokeObjectURL(url);
+        URL.revokeObjectURL(
+            url
+        );
 
-        alert("バックアップファイルを作成しました。");
+        alert(
+            "バックアップファイルを作成しました。"
+        );
     } catch (error) {
         console.error(error);
-        alert("バックアップに失敗しました。");
+
+        alert(
+            "バックアップに失敗しました。"
+        );
     }
 }
 
 function clearStore(storeName) {
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(
-            storeName,
-            "readwrite"
-        );
+    return new Promise(
+        (resolve, reject) => {
+            const transaction =
+                db.transaction(
+                    storeName,
+                    "readwrite"
+                );
 
-        const store =
-            transaction.objectStore(storeName);
+            const store =
+                transaction.objectStore(
+                    storeName
+                );
 
-        const request = store.clear();
+            const request =
+                store.clear();
 
-        request.onsuccess = () => {
-            resolve();
-        };
+            request.onsuccess = () => {
+                resolve();
+            };
 
-        request.onerror = () => {
-            reject(request.error);
-        };
-    });
+            request.onerror = () => {
+                reject(
+                    request.error
+                );
+            };
+        }
+    );
 }
 
-async function restoreBackupData(file) {
+async function restoreBackupData(
+    file
+) {
     try {
-        const text = await file.text();
-        const data = JSON.parse(text);
+        const text =
+            await file.text();
+
+        const data =
+            JSON.parse(text);
 
         if (
             !data ||
             data.version !== 1 ||
-            !Array.isArray(data.routines) ||
-            !Array.isArray(data.todos) ||
-            !Array.isArray(data.memos)
+            !Array.isArray(
+                data.routines
+            ) ||
+            !Array.isArray(
+                data.todos
+            ) ||
+            !Array.isArray(
+                data.memos
+            )
         ) {
-            throw new Error("Invalid backup format");
+            throw new Error(
+                "Invalid backup format"
+            );
         }
 
-        const confirmed = confirm(
-            "現在のルーティン・ToDo・Memoをバックアップの内容に置き換えます。よろしいですか？"
-        );
+        const confirmed =
+            confirm(
+                "現在のルーティン・ToDo・Memoをバックアップの内容に置き換えます。よろしいですか？"
+            );
 
         if (!confirmed) {
             return;
         }
 
-        await clearStore("routines");
-        await clearStore("todos");
-        await clearStore("memos");
+        await clearStore(
+            "routines"
+        );
 
-        for (const routine of data.routines) {
-            await saveRoutine(routine);
+        await clearStore(
+            "todos"
+        );
+
+        await clearStore(
+            "memos"
+        );
+
+        for (
+            const routine of
+            data.routines
+        ) {
+            await saveRoutine(
+                routine
+            );
         }
 
-        for (const todo of data.todos) {
-            await saveTodo(todo);
+        for (
+            const todo of
+            data.todos
+        ) {
+            await saveTodo(
+                todo
+            );
         }
 
-        for (const memo of data.memos) {
-            await saveMemo(memo);
+        for (
+            const memo of
+            data.memos
+        ) {
+            await saveMemo(
+                memo
+            );
         }
 
         const colorTheme =
-            COLOR_THEMES[data.colorTheme]
+            COLOR_THEMES[
+                data.colorTheme
+            ]
                 ? data.colorTheme
                 : "monochrome";
 
@@ -2336,15 +3250,22 @@ async function restoreBackupData(file) {
 
         applyColorTheme();
 
+        // 復元したデータも整理する
+        await normalizeTodoData();
+        await restoreExpiredOneTimeTodos();
+
         alert(
             "データを復元しました。"
         );
 
         await renderSettingsScreen(
-            document.getElementById("screen")
+            document.getElementById(
+                "screen"
+            )
         );
     } catch (error) {
         console.error(error);
+
         alert(
             "バックアップファイルを読み込めませんでした。"
         );
@@ -2352,21 +3273,31 @@ async function restoreBackupData(file) {
 }
 
 async function deleteAllData() {
-    const firstConfirmed = confirm(
-        "すべてのルーティン・ToDo・Memoを削除します。よろしいですか？"
-    );
+    const firstConfirmed =
+        confirm(
+            "すべてのルーティン・ToDo・Memoを削除します。よろしいですか？"
+        );
 
     if (!firstConfirmed) return;
 
-    const secondConfirmed = confirm(
-        "本当にすべて削除しますか？この操作は元に戻せません。"
-    );
+    const secondConfirmed =
+        confirm(
+            "本当にすべて削除しますか？この操作は元に戻せません。"
+        );
 
     if (!secondConfirmed) return;
 
-    await clearStore("routines");
-    await clearStore("todos");
-    await clearStore("memos");
+    await clearStore(
+        "routines"
+    );
+
+    await clearStore(
+        "todos"
+    );
+
+    await clearStore(
+        "memos"
+    );
 
     await saveSetting({
         id: "initialized",
@@ -2382,14 +3313,17 @@ async function deleteAllData() {
 
     await initializeData();
 
-    selectedDate = getTodayDateString();
+    selectedDate =
+        getTodayDateString();
 
     alert(
         "すべてのデータを削除し、初期状態に戻しました。"
     );
 
     await renderSettingsScreen(
-        document.getElementById("screen")
+        document.getElementById(
+            "screen"
+        )
     );
 }
 
@@ -2397,13 +3331,19 @@ async function deleteAllData() {
 // Settings
 // =========================
 
-function renderSettingsScreen(screen) {
-    const currentTheme = getCurrentColorTheme();
+function renderSettingsScreen(
+    screen
+) {
+    const currentTheme =
+        getCurrentColorTheme();
 
     screen.innerHTML = `
         <div class="screen-header">
             <div>
-                <div class="screen-title">Settings</div>
+                <div class="screen-title">
+                    Settings
+                </div>
+
                 <div class="screen-subtitle">
                     アプリの設定
                 </div>
@@ -2421,10 +3361,18 @@ function renderSettingsScreen(screen) {
                 id="backup-button"
             >
                 <div>
-                    <strong>バックアップ</strong>
-                    <span>データをJSONファイルに保存</span>
+                    <strong>
+                        バックアップ
+                    </strong>
+
+                    <span>
+                        データをJSONファイルに保存
+                    </span>
                 </div>
-                <span class="settings-arrow">›</span>
+
+                <span class="settings-arrow">
+                    ›
+                </span>
             </button>
 
             <button
@@ -2432,10 +3380,18 @@ function renderSettingsScreen(screen) {
                 id="restore-button"
             >
                 <div>
-                    <strong>データを復元</strong>
-                    <span>バックアップファイルから復元</span>
+                    <strong>
+                        データを復元
+                    </strong>
+
+                    <span>
+                        バックアップファイルから復元
+                    </span>
                 </div>
-                <span class="settings-arrow">›</span>
+
+                <span class="settings-arrow">
+                    ›
+                </span>
             </button>
 
             <button
@@ -2443,10 +3399,18 @@ function renderSettingsScreen(screen) {
                 id="delete-all-button"
             >
                 <div>
-                    <strong>すべてのデータを削除</strong>
-                    <span>初期状態に戻します</span>
+                    <strong>
+                        すべてのデータを削除
+                    </strong>
+
+                    <span>
+                        初期状態に戻します
+                    </span>
                 </div>
-                <span class="settings-arrow">›</span>
+
+                <span class="settings-arrow">
+                    ›
+                </span>
             </button>
 
         </div>
@@ -2459,24 +3423,39 @@ function renderSettingsScreen(screen) {
 
             <div class="settings-item">
                 <div>
-                    <strong>通知</strong>
-                    <span>今後実装予定</span>
+                    <strong>
+                        通知
+                    </strong>
+
+                    <span>
+                        今後実装予定
+                    </span>
                 </div>
             </div>
 
-            <div class="settings-item settings-color-item">
+            <div
+                class="settings-item settings-color-item"
+            >
                 <div>
-                    <strong>カラー</strong>
-                    <span>アプリのアクセントカラー</span>
+                    <strong>
+                        カラー
+                    </strong>
+
+                    <span>
+                        アプリのアクセントカラー
+                    </span>
                 </div>
 
                 <div class="color-selector">
-                    ${Object.entries(COLOR_THEMES)
+                    ${Object.entries(
+                        COLOR_THEMES
+                    )
                         .map(
                             ([key, theme]) => `
                                 <button
                                     class="color-option ${
-                                        key === currentTheme
+                                        key ===
+                                        currentTheme
                                             ? "selected"
                                             : ""
                                     }"
@@ -2490,7 +3469,8 @@ function renderSettingsScreen(screen) {
                                     )}"
                                 >
                                     ${
-                                        key === currentTheme
+                                        key ===
+                                        currentTheme
                                             ? "✓"
                                             : ""
                                     }
@@ -2503,8 +3483,13 @@ function renderSettingsScreen(screen) {
 
             <div class="settings-item">
                 <div>
-                    <strong>アプリ情報</strong>
-                    <span>Daily Timeline</span>
+                    <strong>
+                        アプリ情報
+                    </strong>
+
+                    <span>
+                        Daily Timeline
+                    </span>
                 </div>
             </div>
 
@@ -2519,57 +3504,96 @@ function renderSettingsScreen(screen) {
     `;
 
     document
-        .getElementById("backup-button")
-        .addEventListener("click", async () => {
-            await backupData();
-        });
+        .getElementById(
+            "backup-button"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                await backupData();
+            }
+        );
 
     document
-        .getElementById("restore-button")
-        .addEventListener("click", () => {
-            document
-                .getElementById("restore-file-input")
-                .click();
-        });
+        .getElementById(
+            "restore-button"
+        )
+        .addEventListener(
+            "click",
+            () => {
+                document
+                    .getElementById(
+                        "restore-file-input"
+                    )
+                    .click();
+            }
+        );
 
     document
-        .getElementById("restore-file-input")
-        .addEventListener("change", async (event) => {
-            const file = event.target.files?.[0];
+        .getElementById(
+            "restore-file-input"
+        )
+        .addEventListener(
+            "change",
+            async (event) => {
+                const file =
+                    event.target
+                        .files?.[0];
 
-            if (!file) return;
+                if (!file) return;
 
-            await restoreBackupData(file);
-
-            event.target.value = "";
-        });
-
-    document
-        .getElementById("delete-all-button")
-        .addEventListener("click", async () => {
-            await deleteAllData();
-        });
-
-    screen
-        .querySelectorAll(".color-option")
-        .forEach((button) => {
-            button.addEventListener("click", () => {
-                const color =
-                    button.dataset.color;
-
-                if (!COLOR_THEMES[color]) {
-                    return;
-                }
-
-                localStorage.setItem(
-                    "dailyTimelineColor",
-                    color
+                await restoreBackupData(
+                    file
                 );
 
-                applyColorTheme();
+                event.target.value =
+                    "";
+            }
+        );
 
-                renderSettingsScreen(screen);
-            });
+    document
+        .getElementById(
+            "delete-all-button"
+        )
+        .addEventListener(
+            "click",
+            async () => {
+                await deleteAllData();
+            }
+        );
+
+    screen
+        .querySelectorAll(
+            ".color-option"
+        )
+        .forEach((button) => {
+            button.addEventListener(
+                "click",
+                () => {
+                    const color =
+                        button.dataset
+                            .color;
+
+                    if (
+                        !COLOR_THEMES[
+                            color
+                        ]
+                    ) {
+                        return;
+                    }
+
+                    localStorage.setItem(
+                        "dailyTimelineColor",
+                        color
+                    );
+
+                    applyColorTheme();
+
+                    renderSettingsScreen(
+                        screen
+                    );
+                }
+            );
         });
 }
 
@@ -2578,12 +3602,17 @@ function renderSettingsScreen(screen) {
 // =========================
 
 function updateNavigationState() {
-    document.querySelectorAll(".nav-item").forEach((item) => {
-        item.classList.toggle(
-            "active",
-            item.dataset.screen === currentScreen
-        );
-    });
+    document
+        .querySelectorAll(
+            ".nav-item"
+        )
+        .forEach((item) => {
+            item.classList.toggle(
+                "active",
+                item.dataset.screen ===
+                    currentScreen
+            );
+        });
 }
 
 // =========================
@@ -2591,23 +3620,33 @@ function updateNavigationState() {
 // =========================
 
 function registerServiceWorker() {
-    if (!("serviceWorker" in navigator)) {
+    if (
+        !(
+            "serviceWorker" in
+            navigator
+        )
+    ) {
         return;
     }
 
-    window.addEventListener("load", () => {
-        navigator.serviceWorker
-            .register("./sw.js")
-            .then(() => {
-                console.log("Service Worker registered.");
-            })
-            .catch((error) => {
-                console.error(
-                    "Service Worker registration failed:",
-                    error
-                );
-            });
-    });
+    window.addEventListener(
+        "load",
+        () => {
+            navigator.serviceWorker
+                .register("./sw.js")
+                .then(() => {
+                    console.log(
+                        "Service Worker registered."
+                    );
+                })
+                .catch((error) => {
+                    console.error(
+                        "Service Worker registration failed:",
+                        error
+                    );
+                });
+        }
+    );
 }
 
 // =========================
@@ -2616,26 +3655,37 @@ function registerServiceWorker() {
 
 async function initializeApp() {
     try {
-        db = await openDatabase();
+        db =
+            await openDatabase();
 
         await initializeData();
 
-        // 日付が変わっていた場合、一度きりToDoを
-        // ToDoリストへ戻す
+        // 既存のToDoデータを
+        // 新しい仕様に合わせて整理
+        await normalizeTodoData();
+
+        // 日付をまたいだ
+        // 未完了の一度きりToDoを復帰
         await restoreExpiredOneTimeTodos();
 
         applyColorTheme();
 
         setupNavigation();
+
         updateNavigationState();
 
         await renderScreen();
     } catch (error) {
         console.error(error);
 
-        document.getElementById("screen").innerHTML = `
+        document.getElementById(
+            "screen"
+        ).innerHTML = `
             <div class="empty-state">
-                <p>アプリの初期化に失敗しました。</p>
+                <p>
+                    アプリの初期化に失敗しました。
+                </p>
+
                 <p>
                     ブラウザのIndexedDBが利用できるか確認してください。
                 </p>
@@ -2646,4 +3696,3 @@ async function initializeApp() {
 
 registerServiceWorker();
 initializeApp();
-

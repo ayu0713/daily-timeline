@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    >
+
+    <title>Daily Timeline</title>
+
+    <!-- CSS -->
+    <link rel="stylesheet" href="style.css">
+
+    <!-- PWA -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#ffffff">
+
+    <!-- iPhone / iOS -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Daily Timeline">
+</head>
+
+<body>
+
+    <div id="app">
+
+        <main id="screen">
+            <!-- JavaScriptで画面を表示する -->
+        </main>
+
+        <nav class="bottom-nav">
+
+            <button class="nav-item active" data-screen="timeline">
+                <span class="nav-icon">◷</span>
+                <span class="nav-label">Timeline</span>
+            </button>
+
+            <button class="nav-item" data-screen="memo">
+                <span class="nav-icon">▤</span>
+                <span class="nav-label">Memo</span>
+            </button>
+
+            <button class="nav-item" data-screen="todo">
+                <span class="nav-icon">✓</span>
+                <span class="nav-label">ToDo</span>
+            </button>
+
+            <button class="nav-item" data-screen="calendar">
+                <span class="nav-icon">□</span>
+                <span class="nav-label">Calendar</span>
+            </button>
+
+            <button class="nav-item" data-screen="settings">
+                <span class="nav-icon">⚙</span>
+                <span class="nav-label">Settings</span>
+            </button>
+
+        </nav>
+
+    </div>
+
+    <script src="app.js"></script>
+
+</body>
+</html>

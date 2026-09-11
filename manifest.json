@@ -1,0 +1,12 @@
+{
+  "name": "Daily Timeline",
+  "short_name": "Daily Timeline",
+  "description": "毎日の予定・ToDo・メモをTimelineで管理するアプリ",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#222222",
+  "orientation": "portrait",
+  "lang": "ja"
+}
+
